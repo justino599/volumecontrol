@@ -4,6 +4,7 @@ const cached = {
   volumeText: null,
   monoCheckbox: null,
   rememberCheckbox: null,
+  rememberPathCheckbox: null,
   enableCheckbox: null
 };
 
@@ -42,6 +43,37 @@ function extractRootDomain(url) {
     domain = domain.split('/')[0];
     domain = domain.split(':')[0];
     return domain.toLowerCase();
+}
+
+function extractSitePath(url) {
+    if (!url) return null;
+    if (url.startsWith('file:')) return 'Local File';
+    if (url.startsWith('chrome') || url.startsWith('edge') || url.startsWith('about') || url.startsWith('extension')) return null;
+
+    try {
+        const parsed = new URL(url);
+        let hostname = parsed.hostname.toLowerCase();
+        if (hostname.startsWith('www.')) hostname = hostname.slice(4);
+        const pathname = parsed.pathname;
+        if (!pathname || pathname === '/') return hostname;
+        if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1);
+        return hostname + pathname.toLowerCase();
+    } catch (e) {
+        return extractRootDomain(url);
+    }
+}
+
+function getRememberKey(tab, usePath) {
+    return usePath ? extractSitePath(tab.url) : extractRootDomain(tab.url);
+}
+
+function findRememberedSetting(siteSettings, tab) {
+    if (!siteSettings || !tab || !tab.url) return null;
+    const pathKey = extractSitePath(tab.url);
+    const domainKey = extractRootDomain(tab.url);
+    if (pathKey && siteSettings[pathKey]) return { key: pathKey, settings: siteSettings[pathKey] };
+    if (domainKey && siteSettings[domainKey]) return { key: domainKey, settings: siteSettings[domainKey] };
+    return null;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -109,8 +141,7 @@ function handleTabs(tabs) {
                     const data = await storageGet({ fqdns: [], whitelist: [], whitelistMode: false, siteSettings: {} });
                     let isExcluded = false;
                     if (data.whitelistMode) {
-                        const remembered = Object.keys(data.siteSettings || {});
-                        isExcluded = !remembered.includes(domain);
+                        isExcluded = !findRememberedSetting(data.siteSettings, currentTab);
                     } else {
                         isExcluded = data.fqdns.includes(domain);
                     }
@@ -170,12 +201,13 @@ async function toggleSitePermission(domain, shouldExclude, tabId) {
             const sd = await storageGet({ siteSettings: {} });
             const settings = sd.siteSettings || {};
             if (shouldExclude) {
-                if (settings[domain]) {
-                    delete settings[domain];
+                const found = findRememberedSetting(settings, tab);
+                if (found) {
+                    delete settings[found.key];
                     await storageSet({ siteSettings: settings });
                 }
             } else {
-                if (!settings[domain]) {
+                if (!findRememberedSetting(settings, tab)) {
                     settings[domain] = { volume: 0, mono: false };
                     await storageSet({ siteSettings: settings });
                     // Try to apply settings immediately to the tab that requested the change
@@ -226,18 +258,30 @@ function formatValue(dB) {
 
 async function saveSiteSettings(tab) {
     try {
-        const rememberCheckbox = document.getElementById("remember-checkbox");
+        const rememberCheckbox = cached.rememberCheckbox || document.getElementById("remember-checkbox");
+        const rememberPathCheckbox = cached.rememberPathCheckbox || document.getElementById("remember-path-checkbox");
         if (!rememberCheckbox || !rememberCheckbox.checked || !tab || !tab.url) return;
 
-        const domain = extractRootDomain(tab.url);
-        if (!domain) return;
+        const usePath = rememberPathCheckbox && rememberPathCheckbox.checked;
+        const key = getRememberKey(tab, usePath);
+        if (!key) return;
+
+        const pathKey = extractSitePath(tab.url);
+        const domainKey = extractRootDomain(tab.url);
 
         const volumeSlider = cached.slider || document.getElementById("volume-slider");
         const monoCheckbox = cached.monoCheckbox || document.getElementById("mono-checkbox");
 
         const data = await storageGet({ siteSettings: {} });
         data.siteSettings = data.siteSettings || {};
-        data.siteSettings[domain] = {
+
+        if (usePath) {
+            if (domainKey && data.siteSettings[domainKey]) delete data.siteSettings[domainKey];
+        } else {
+            if (pathKey && data.siteSettings[pathKey]) delete data.siteSettings[pathKey];
+        }
+
+        data.siteSettings[key] = {
             volume: parseInt(volumeSlider?.value, 10) || 0,
             mono: Boolean(monoCheckbox?.checked)
         };
@@ -246,12 +290,12 @@ async function saveSiteSettings(tab) {
         // Notify the content script in this tab immediately so volume/mono are applied without waiting
         if (tab && tab.id) {
             try {
-                browserApi.tabs.sendMessage(tab.id, { command: "setVolume", dB: data.siteSettings[domain].volume }, () => {
+                browserApi.tabs.sendMessage(tab.id, { command: "setVolume", dB: data.siteSettings[key].volume }, () => {
                     if (browserApi.runtime && browserApi.runtime.lastError) {
                         // It's possible the content script hasn't injected into the page yet; ignore harmless errors.
                     }
                 });
-                browserApi.tabs.sendMessage(tab.id, { command: "setMono", mono: Boolean(data.siteSettings[domain].mono) }, () => {
+                browserApi.tabs.sendMessage(tab.id, { command: "setMono", mono: Boolean(data.siteSettings[key].mono) }, () => {
                     if (browserApi.runtime && browserApi.runtime.lastError) {}
                 });
             } catch (e) {
@@ -289,16 +333,18 @@ async function toggleMono(tab) {
 
 async function toggleRemember(tab) {
     try {
-        const rememberCheckbox = document.getElementById("remember-checkbox");
-        const domain = extractRootDomain(tab.url);
-        if (!domain) return;
+        const rememberCheckbox = cached.rememberCheckbox || document.getElementById("remember-checkbox");
+        const rememberPathCheckbox = cached.rememberPathCheckbox || document.getElementById("remember-path-checkbox");
+        const usePath = rememberPathCheckbox && rememberPathCheckbox.checked;
+        const key = getRememberKey(tab, usePath);
+        if (!key) return;
 
         if (rememberCheckbox && rememberCheckbox.checked) {
             await saveSiteSettings(tab);
         } else {
             const data = await storageGet({ siteSettings: {} });
-            if (data.siteSettings && data.siteSettings[domain]) {
-                delete data.siteSettings[domain];
+            if (data.siteSettings && data.siteSettings[key]) {
+                delete data.siteSettings[key];
                 await storageSet({ siteSettings: data.siteSettings });
             }
         }
@@ -340,11 +386,13 @@ async function initializeControls(tab) {
     const volumeText = document.querySelector("#volume-text");
     const monoCheckbox = document.querySelector("#mono-checkbox");
     const rememberCheckbox = document.querySelector("#remember-checkbox");
+    const rememberPathCheckbox = document.querySelector("#remember-path-checkbox");
 
     cached.slider = volumeSlider;
     cached.volumeText = volumeText;
     cached.monoCheckbox = monoCheckbox;
     cached.rememberCheckbox = rememberCheckbox;
+    cached.rememberPathCheckbox = rememberPathCheckbox;
 
     if (volumeSlider) {
       volumeSlider.addEventListener("input", () => {
@@ -362,17 +410,22 @@ async function initializeControls(tab) {
 
     if (monoCheckbox) monoCheckbox.addEventListener("change", () => toggleMono(tab));
     if (rememberCheckbox) rememberCheckbox.addEventListener("change", () => toggleRemember(tab));
+    if (rememberPathCheckbox) rememberPathCheckbox.addEventListener("change", () => {
+        if (cached.rememberCheckbox && cached.rememberCheckbox.checked) saveSiteSettings(tab);
+    });
 
     const domain = extractRootDomain(tab.url);
     if (!domain) return;
 
     try {
         const data = await storageGet({ siteSettings: {} });
-        const saved = (data.siteSettings || {})[domain];
-        if (saved) {
+        const found = findRememberedSetting(data.siteSettings, tab);
+        if (found) {
             if (rememberCheckbox) rememberCheckbox.checked = true;
-            if (saved.volume !== undefined) setVolume(saved.volume, null);
-            if (saved.mono !== undefined && monoCheckbox) monoCheckbox.checked = saved.mono;
+            const pathKey = extractSitePath(tab.url);
+            if (rememberPathCheckbox) rememberPathCheckbox.checked = found.key === pathKey;
+            if (found.settings.volume !== undefined) setVolume(found.settings.volume, null);
+            if (found.settings.mono !== undefined && monoCheckbox) monoCheckbox.checked = found.settings.mono;
         } else {
             browserApi.tabs.sendMessage(tab.id, { command: "getVolume" }, (response) => {
                 if (!browserApi.runtime.lastError && response && response.response !== undefined) {
