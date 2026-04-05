@@ -223,7 +223,64 @@ function extractRootDomain(url) {
     let domain = url.replace(/^(https?|ftp):\/\/(www\.)?/, '');
     domain = domain.split('/')[0].split(':')[0];
     return domain.toLowerCase();
-} 
+}
+
+function vcHostname(url) {
+    if (!url) return "";
+    const urlStr = String(url);
+    if (urlStr.startsWith("file:")) return "Local File";
+    try {
+        const parsed = new URL(urlStr);
+        if (parsed.protocol === "file:") return "Local File";
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "ftp:") return "";
+        let hostname = parsed.hostname.toLowerCase();
+        if (hostname.startsWith("www.")) hostname = hostname.slice(4);
+        return hostname;
+    } catch (e) {
+        let domain = urlStr.replace(/^(https?|ftp):\/\/(www\.)?/i, "");
+        domain = domain.split("/")[0].split(":")[0];
+        return domain.toLowerCase();
+    }
+}
+
+function sitePathKey(url) {
+    if (!url) return "";
+    const urlStr = String(url);
+    if (urlStr.startsWith("file:")) return "Local File";
+    try {
+        const parsed = new URL(urlStr);
+        if (parsed.protocol === "file:") return "Local File";
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "ftp:") return "";
+        let hostname = parsed.hostname.toLowerCase();
+        if (hostname.startsWith("www.")) hostname = hostname.slice(4);
+        if (!hostname) return "";
+        let pathname = parsed.pathname;
+        if (!pathname || pathname === "/") return hostname;
+        if (pathname.length > 1 && pathname.endsWith("/")) pathname = pathname.slice(0, -1);
+        return hostname + pathname.toLowerCase();
+    } catch (e) {
+        return vcHostname(urlStr) || "";
+    }
+}
+
+function rememberedEntry(siteSettings, url) {
+    siteSettings = siteSettings || {};
+    const pathKey = sitePathKey(url);
+    const hostKey = vcHostname(url);
+    if (pathKey && siteSettings[pathKey]) return siteSettings[pathKey];
+    if (hostKey && siteSettings[hostKey]) return siteSettings[hostKey];
+}
+
+function anyRememberedKeyForHost(siteSettings, hostLower) {
+    const host = String(hostLower || "").toLowerCase();
+    if (!host) return false;
+    return Object.keys(siteSettings || {}).some((key) => {
+        const keyStr = String(key);
+        const slashIdx = keyStr.indexOf("/");
+        const hostPart = (slashIdx === -1 ? keyStr : keyStr.slice(0, slashIdx)).toLowerCase();
+        return host.includes(hostPart) || hostPart.includes(host);
+    });
+}
 
 function start() {
     if (!browserAPI) return;
@@ -242,10 +299,8 @@ function start() {
 
         let blocked = false;
         if (data.whitelistMode) {
-            // Whitelist is derived from remembered sites (siteSettings)
-            const remembered = Object.keys(data.siteSettings || {});
-            if (tc.settings.debugMode) log(`start(): remembered samples=[${remembered.slice(0,5).join(',')}]`, 4);
-            if (!remembered.some(d => currentDomain.includes(d))) blocked = true;
+            if (tc.settings.debugMode) log(`start(): remembered samples=[${Object.keys(data.siteSettings||{}).slice(0,5).join(',')}]`, 4);
+            if (!anyRememberedKeyForHost(data.siteSettings, vcHostname(window.location.href))) blocked = true;
         } else {
             if (data.fqdns.some(d => currentDomain.includes(d))) blocked = true;
         }
@@ -259,10 +314,10 @@ function start() {
             return;
         }
 
-        if (data.siteSettings && data.siteSettings[currentDomain]) {
-            const s = data.siteSettings[currentDomain];
-            if (s.volume !== undefined) tc.vars.dB = parseInt(s.volume, 10) || 0;
-            if (s.mono !== undefined) tc.vars.mono = s.mono;
+        const saved = rememberedEntry(data.siteSettings, window.location.href);
+        if (saved) {
+            if (saved.volume !== undefined) tc.vars.dB = parseInt(saved.volume, 10) || 0;
+            if (saved.mono !== undefined) tc.vars.mono = saved.mono;
         }
 
         init();
@@ -299,16 +354,14 @@ if (browserAPI && browserAPI.storage && browserAPI.storage.onChanged) {
 
         // If per-site settings changed, apply them if they affect this domain
         if (changes.siteSettings) {
-            const currentDomain = extractRootDomain(window.location.href);
             browserAPI.storage.local.get({ siteSettings: {} }, (data) => {
                 if (browserAPI.runtime && browserAPI.runtime.lastError) return;
-                if (data.siteSettings && data.siteSettings[currentDomain]) {
-                    const s = data.siteSettings[currentDomain];
-                    if (s.volume !== undefined) tc.vars.dB = parseInt(s.volume, 10) || 0;
-                    if (s.mono !== undefined) tc.vars.mono = s.mono;
-                    if (tc.settings.debugMode) log(`siteSettings updated for ${currentDomain}: dB=${tc.vars.dB}, mono=${tc.vars.mono}`, 4);
+                const saved = rememberedEntry(data.siteSettings, window.location.href);
+                if (saved) {
+                    if (saved.volume !== undefined) tc.vars.dB = parseInt(saved.volume, 10) || 0;
+                    if (saved.mono !== undefined) tc.vars.mono = saved.mono;
+                    if (tc.settings.debugMode) log(`siteSettings updated: dB=${tc.vars.dB}, mono=${tc.vars.mono}`, 4);
                     applyState();
-                    // Ensure audio nodes exist for any existing media elements
                     try {
                         init();
                         for (const el of document.querySelectorAll('audio, video')) connectOutput(el);
